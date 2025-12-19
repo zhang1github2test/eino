@@ -337,7 +337,7 @@ func newRunnablePacker[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O
 	c Collect[I, O, TOption], t Transform[I, O, TOption], enableCallback bool) *runnablePacker[I, O, TOption] {
 
 	r := &runnablePacker[I, O, TOption]{}
-
+	// 为每种方法包装相应的回调处理函数
 	if enableCallback {
 		if i != nil {
 			i = invokeWithCallbacks(i)
@@ -356,6 +356,7 @@ func newRunnablePacker[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O
 		}
 	}
 
+	// invoke方法设置
 	if i != nil {
 		r.i = i
 	} else if s != nil {
@@ -366,6 +367,7 @@ func newRunnablePacker[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O
 		r.i = invokeByTransform(t)
 	}
 
+	// stream方法设置
 	if s != nil {
 		r.s = s
 	} else if t != nil {
@@ -376,6 +378,7 @@ func newRunnablePacker[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O
 		r.s = streamByCollect(c)
 	}
 
+	// collect方法设置
 	if c != nil {
 		r.c = c
 	} else if t != nil {
@@ -386,6 +389,7 @@ func newRunnablePacker[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O
 		r.c = collectByStream(s)
 	}
 
+	// Transform方法设置
 	if t != nil {
 		r.t = t
 	} else if s != nil {

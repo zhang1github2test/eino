@@ -525,6 +525,8 @@ func (g *graph) addToValidateMap(startNode, endNode string, mapping []*FieldMapp
 // check again if nodes in toValidateMap have been updated. because when there are multiple linked passthrough nodes, in the worst scenario, only one node can be updated at a time.
 func (g *graph) updateToValidateMap() error {
 	var startNodeOutputType, endNodeInputType reflect.Type
+	// 采用循环处理的方式是因为当存在多个连续的 passthrough 节点时，
+	// 可能需要多次迭代才能完全推断出所有节点的类型。
 	for {
 		hasChanged := false
 		for startNode := range g.toValidateMap {
@@ -544,16 +546,20 @@ func (g *graph) updateToValidateMap() error {
 
 				hasChanged = true
 				// assume that START and END type isn't empty
+				// passthrough节点时将前驱节点的输出类型作为passthrough节点的输入类型
+				// 设置passthrough节点的输出类型为passthrough节点的输入类型
 				if startNodeOutputType != nil && endNodeInputType == nil {
 					g.nodes[endNode.endNode].cr.inputType = startNodeOutputType
 					g.nodes[endNode.endNode].cr.outputType = g.nodes[endNode.endNode].cr.inputType
 					g.nodes[endNode.endNode].cr.genericHelper = g.getNodeGenericHelper(startNode).forSuccessorPassthrough()
 				} else if startNodeOutputType == nil /* redundant condition && endNodeInputType != nil */ {
+					// 前继节点为passthrough节点时，将目标节点的输入类型赋值给起始节点的输入类型
 					g.nodes[startNode].cr.inputType = endNodeInputType
 					g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
 					g.nodes[startNode].cr.genericHelper = g.getNodeGenericHelper(endNode.endNode).forPredecessorPassthrough()
 				} else if len(endNode.mappings) == 0 {
 					// common node check
+					// 做常规的节点赋值的可能性检查
 					result := checkAssignable(startNodeOutputType, endNodeInputType)
 					if result == assignableTypeMustNot {
 						return fmt.Errorf("graph edge[%s]-[%s]: start node's output type[%s] and end node's input type[%s] mismatch",
@@ -563,6 +569,7 @@ func (g *graph) updateToValidateMap() error {
 						if _, ok := g.handlerOnEdges[startNode]; !ok {
 							g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 						}
+						// 注册运行时类型转换器
 						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], g.getNodeGenericHelper(endNode.endNode).inputConverter)
 					}
 					continue
@@ -637,10 +644,13 @@ func (g *graph) outputType() reflect.Type {
 }
 
 func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composableRunnable, error) {
+	// 1. 错误检查与运行模式判断
 	if g.buildError != nil {
 		return nil, g.buildError
 	}
-
+	// 1.1 确定图的运行模式：
+	// 默认使用 Pregel 模式，适用于有循环的图
+	// 如果是工作流或指定了全前驱触发模式，则使用 DAG 模式
 	// get run type
 	runType := runTypePregel
 	cb := pregelChannelBuilder
@@ -653,7 +663,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		runType = runTypeDAG
 		cb = dagChannelBuilder
 	}
-
+	// 2. Eager 模式设置
 	// get eager type
 	eager := false
 	if isWorkflow(g.cmp) || runType == runTypeDAG {
@@ -662,7 +672,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if opt != nil && opt.eagerDisabled {
 		eager = false
 	}
-
+	// 3. 基本验证 图的开始节点和结束节点设置
 	if len(g.startNodes) == 0 {
 		return nil, errors.New("start node not set")
 	}
@@ -671,12 +681,13 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	// toValidateMap isn't empty means there are nodes that cannot infer type
+	// 4. 类型推断验证 确保所有节点的输入输出类型都能正确推断
 	for _, v := range g.toValidateMap {
 		if len(v) > 0 {
 			return nil, fmt.Errorf("some node's input or output types cannot be inferred: %v", g.toValidateMap)
 		}
 	}
-
+	// 5. 字段映射验证 验证字段映射配置并注册相应的处理器
 	for key := range g.fieldMappingRecords {
 		// not allowed to map multiple fields to the same field
 		toMap := make(map[string]bool)
@@ -691,7 +702,10 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeGenericHelper(key).inputFieldMappingConverter)
 	}
 
+	// 6. 子图编译准备 ，建立回调机制
 	key2SubGraphs := g.beforeChildGraphsCompile(opt)
+
+	// 7. 节点编译与通道调用构建
 	chanSubscribeTo := make(map[string]*chanCall)
 	for name, node := range g.nodes {
 		node.beforeChildGraphCompile(name, key2SubGraphs)
@@ -721,6 +735,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		chanSubscribeTo[name] = chCall
 	}
 
+	// 8. 前驱节点关系构建
 	dataPredecessors := make(map[string][]string)
 	controlPredecessors := make(map[string][]string)
 	for start, ends := range g.controlEdges {
@@ -776,6 +791,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		mergeConfigs = make(map[string]FanInMergeConfig)
 	}
 
+	// 9. 运行器初始化
 	r := &runner{
 		chanSubscribeTo:     chanSubscribeTo,
 		controlPredecessors: controlPredecessors,
@@ -804,7 +820,9 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 	r.successors = successors
 
+	// 10. 状态管理器设置
 	if g.stateGenerator != nil {
+		// 设置状态上下文生成器
 		r.runCtx = func(ctx context.Context) context.Context {
 			var parent *internalState
 			if p, ok := ctx.Value(stateKey{}).(*internalState); ok {
@@ -818,14 +836,16 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		}
 	}
 
+	// 11. DAG 模式验证
 	if runType == runTypeDAG {
+		// 验证图结构是否确实无环
 		err := validateDAG(r.chanSubscribeTo, controlPredecessors)
 		if err != nil {
 			return nil, err
 		}
 		r.dag = true
 	}
-
+	// 12. 中断与检查点设置
 	if opt != nil {
 		inputPairs := make(map[string]streamConvertPair)
 		outputPairs := make(map[string]streamConvertPair)
@@ -841,7 +861,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		r.interruptAfterNodes = opt.interruptAfterNodes
 		r.options = *opt
 	}
-
+	// 13. 默认选项处理
 	// default options
 	if r.dag && r.options.maxRunSteps > 0 {
 		return nil, fmt.Errorf("cannot set max run steps in dag mode")
@@ -851,8 +871,9 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 	g.compiled = true
 
+	// 14. 编译完成回调
 	g.onCompileFinish(ctx, opt, key2SubGraphs)
-
+	// 返回封装好的可执行运行器对象
 	return r.toComposableRunnable(), nil
 }
 

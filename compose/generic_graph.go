@@ -126,11 +126,13 @@ func compileAnyGraph[I, O any](ctx context.Context, g AnyGraph, opts ...GraphCom
 	}
 	option := newGraphCompileOptions(opts...)
 
+	//图编译核心逻辑
 	cr, err := g.compile(ctx, option)
 	if err != nil {
 		return nil, err
 	}
 
+	// 设置元信息
 	cr.meta = &executorMeta{
 		component:                  g.component(),
 		isComponentCallbackEnabled: true,
@@ -140,11 +142,12 @@ func compileAnyGraph[I, O any](ctx context.Context, g AnyGraph, opts ...GraphCom
 	cr.nodeInfo = &nodeInfo{
 		name: option.graphName,
 	}
-
+	// 上下文包装器  1、将当前图标记为可执行组件  2、初始化图级别的回调函数
 	ctxWrapper := func(ctx context.Context, opts ...Option) context.Context {
 		return initGraphCallbacks(AppendAddressSegment(ctx, AddressSegmentRunnable, option.graphName), cr.nodeInfo, cr.meta, opts...)
 	}
 
+	// 将图的编译结果转换为泛型可运行对象
 	rp, err := toGenericRunnable[I, O](cr, ctxWrapper)
 	if err != nil {
 		return nil, err
